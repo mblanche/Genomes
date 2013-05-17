@@ -45,16 +45,8 @@ our (%files,$curr_dir);
 MAIN:{
   GetOptions('debug' => \$debug);
   print "#### RUNNING IN DEBUGING MODE ####\n" if $debug;
-
-  my $term = Term::ReadLine->new('brand');
-  my $server = $term->get_reply(
-				prompt => 'Pick a server',
-				choices => \@servers,
-				default => $servers[0],
-			       );
-
-  openServer($server,$term);
-  download_files($server);
+  
+  download_Genome();
   forgeBSgenome(%{$files{fasta}});
   create_bowtie_idx(@{$files{fasta}->{files}});
   create_bowtie2_idx(@{$files{fasta}->{files}});
@@ -63,12 +55,20 @@ MAIN:{
   exit 1;
 }
 
-sub openServer{
-  my $server = shift;
-  my $term = shift;
+sub download_Genome{
+  
+  my $term = Term::ReadLine->new('brand');
+  my $server = $term->get_reply(
+				prompt => 'Pick a server',
+				choices => \@servers,
+				default => $servers[0],
+			       );
+  
+
   
   print "Downloading the list of available genomes from $server...\n";
-  my $ftp = Net::FTP->new($server)
+  my $ftp = Net::FTP->new($server,
+			  Passive => 1)
     or die "Can't connect: $@\n";
   $ftp->login
     or die "Couldn't login\n";
@@ -121,17 +121,15 @@ sub openServer{
 		   id          => $genome[3],
 		   releaseDate => $genome[5]);
   }
+
+  download_files($ftp,$server)
 }
 
 sub download_files {
+  my $ftp = shift;
   my $server = shift;
-  print "Connecting to $server for ftp download\n";
   
-  my $ftp = Net::FTP->new($server)
-    or die "Can't connect: $@\n";
-  $ftp->login
-    or die "Couldn't login\n";
-  $ftp->binary();
+  print "Connecting to $server for ftp download\n";
   
   for my $file_type (@toDownload) {
     
@@ -178,17 +176,15 @@ sub download_files {
   }
 }
 
-
-
 sub create_bowtie_idx {  
   my @files = @_;
   
-  print "indexing $fasta for BowTie\n";
   my $bwt_idx_dir = "$curr_dir/bowtie_indexes";
   make_path($bwt_idx_dir);
   
   for my $fasta (@files) {
     my $file = $fasta;
+    print "indexing $fasta for BowTie\n";
     
     my ($name,$path,$suffix) = fileparse($file,@suffixes);
     $files{bwt_index} = "$bwt_idx_dir/$name";
@@ -205,12 +201,12 @@ sub create_bowtie_idx {
 sub create_bowtie2_idx {  
   my @files = @_;
   
-  print "indexing $fasta for BowTie2\n";
   my $bwt2_idx_dir = "$curr_dir/bowtie2_indexes";
   make_path($bwt2_idx_dir);
   
   for my $fasta (@files) {
     my $file = $fasta;
+    print "indexing $fasta for BowTie2\n";
     
     my ($name,$path,$suffix) = fileparse($file,@suffixes);
     $files{bwt2_index} = "$bwt2_idx_dir/$name";
@@ -277,12 +273,14 @@ sub create_IGV_genome{
 sub forgeBSgenome{
   my %fa = @_;
   
-  print "Forging BSgenome $shortName\n";
+
 
   my ($name,$path,$suffix) = fileparse($fa{files}[0],@suffixes);
   my ($orgID,$assembly,$release) = ($name =~ /^(.*?)\.(.*)\.(.*)/);
   my ($genus,$species) = split /_/,$orgID;
   my $shortName = substr($genus, 0, 1) . $species;
+  
+  print "Forging BSgenome $shortName\n";
 
   my $package = join('.','BSgenome',$shortName,$assembly,$release);
   $package =~ s/_//g;
