@@ -17,7 +17,6 @@ use IO::Uncompress::Gunzip qw(gunzip $GunzipError) ;
 use Term::UI;
 
 our $debug;
-our ($FASTA,$GTF);
 
 our @servers = qw/ftp.ensembl.org
 		  ftp.ensemblgenomes.org/;
@@ -400,7 +399,8 @@ library(BSgenome)
 forgeBSgenomeDataPkg(\"$seed_file\")
 q()
 TOFORGE
-    ;
+;
+  
   close FORGE;
   
   my $oldPWD = $ENV{PWD};
@@ -420,11 +420,8 @@ TOFORGE
 
 sub init{
   GetOptions('debug'   => \$debug,
-	     'fasta=s' => \$FASTA,
-	     'gtf=s'   => \$GTF
 	    );
   print "#### RUNNING IN DEBUGING MODE ####\n" if $debug;
-  #die "Need to provide fasta and gtf if eithe one is provided\n" unless ($FASTA || $GTF) && !($FASTA && $GTF);
 }
 
 
