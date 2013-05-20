@@ -1,5 +1,7 @@
 use strict;
 use warnings;
+use Getopt::Long;
+
 use Net::FTP;
 use Bio::SeqIO;
 
@@ -12,13 +14,10 @@ use File::Basename;
 use File::Copy;
 
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError) ;
-use Archive::Tar;
-
 use Term::UI;
-use Term::ReadLine;
-use Getopt::Long;
 
 our $debug;
+our ($FASTA,$GTF);
 
 our @servers = qw/ftp.ensembl.org
 		  ftp.ensemblgenomes.org/;
@@ -32,39 +31,39 @@ our @suffixes = qw/.dna.toplevel.fa.gz
 		   .gtf
 		   .gtf.gz/;
 
+### This could be expended to include new aligners
+our %index =  (
+	       bowtie  => 'bowtie-build',
+	       bowtie2 => 'bowtie2-build'
+	      );
 
+### Little dataframe to keep track of important info
 our %genomeInfo = map{$_,'--'} qw|fullName
 				  shortName
 				  group
+				  base
 				  id
 				  releaseDate|;
 
 our (%files,$curr_dir);
-
+our $term = Term::ReadLine->new('brand');
 
 MAIN:{
-  GetOptions('debug' => \$debug);
-  print "#### RUNNING IN DEBUGING MODE ####\n" if $debug;
-  
-  download_Genome();
-  forgeBSgenome(%{$files{fasta}});
-  create_bowtie_idx(@{$files{fasta}->{files}});
-  create_bowtie2_idx(@{$files{fasta}->{files}});
+  init();
+  download_Genome() unless $FASTA;
+  create_idx($_) for keys %index;
   create_tophat_idx(@{$files{gtf}->{files}});
+  forgeBSgenome(%{$files{fasta}});
   create_IGV_genome($files{GTF});
   exit 1;
 }
 
 sub download_Genome{
-  
-  my $term = Term::ReadLine->new('brand');
   my $server = $term->get_reply(
 				prompt => 'Pick a server',
 				choices => \@servers,
 				default => $servers[0],
 			       );
-  
-
   
   print "Downloading the list of available genomes from $server...\n";
   my $ftp = Net::FTP->new($server,
@@ -87,9 +86,7 @@ sub download_Genome{
     
     $genomeInfo{fullName} = $genome;
     $genomeInfo{shortName} = $genome_name[$genomes_id{$genome}];
-    
-    
-    print("here \n");
+  
   } elsif ($server eq $servers[1]){
     my %availGenome;
     open OUT, $ftp->get("/pub/current/species.txt");
@@ -121,8 +118,9 @@ sub download_Genome{
 		   id          => $genome[3],
 		   releaseDate => $genome[5]);
   }
-
-  download_files($ftp,$server)
+  
+  download_files($ftp,$server);
+  filterChromosomes();
 }
 
 sub download_files {
@@ -161,8 +159,12 @@ sub download_files {
     $files{$file_type}->{dir}=$local_dir;
     
     my (@files) = $ftp->ls();
-    @files = grep{/\.dna\.toplevel/} @files if $file_type eq 'fasta';
-    @files = grep{/\.gtf/} @files if $file_type eq 'gtf';
+    if ($file_type eq 'fasta'){
+      @files = grep{/\.dna\.toplevel/} @files;
+      ($genomeInfo{base}) = ($files[0] =~ /(.+)\.dna/);
+    }else {
+      @files = grep{/\.gtf/} @files if $file_type eq 'gtf';
+    }
     die "Coulnd not find a file to download\n" unless @files;
   
     for ( @files) {
@@ -176,48 +178,97 @@ sub download_files {
   }
 }
 
-sub create_bowtie_idx {  
-  my @files = @_;
+sub filterChromosomes {
+  my @files = @{$files{fasta}->{files}};
   
-  my $bwt_idx_dir = "$curr_dir/bowtie_indexes";
-  make_path($bwt_idx_dir);
+  my @chrs = getChrName(@files);
+  my %chrs = map{$_ => 1} selectChrs(@chrs);
   
-  for my $fasta (@files) {
-    my $file = $fasta;
-    print "indexing $fasta for BowTie\n";
-    
-    my ($name,$path,$suffix) = fileparse($file,@suffixes);
-    $files{bwt_index} = "$bwt_idx_dir/$name";
   
-    if ($fasta =~/\.gz/) {
-      $file = "$bwt_idx_dir/$name.fa";
-      system("gunzip -c $fasta > $file") == 0 || die "Can't unzip $fasta\n";
-      $files{unzipped_fasta} = "$ENV{PWD}/$file";
+  $files{fasta}->{minimal} = "$files{fasta}->{dir}/$genomeInfo{base}.min.fa";
+  my $out = Bio::SeqIO->new(-file => ">$files{fasta}->{minimal}",
+			    -format => 'fasta');
+  
+  for my $file (@files){
+    if($file =~ /\.gz$/){
+      open IN, "gunzip -c $file |";
+    }else{
+      open IN, $file;
     }
-    system("bowtie-build $file $files{bwt_index} >$bwt_idx_dir/bwt_idx.log 2>&1") unless $debug;
+    my $in = Bio::SeqIO->new(-fh => \*IN,
+			     -format => 'fasta');
+    while (my $seq = $in->next_seq){
+      $out->write_seq($seq) if exists $chrs{$seq->display_id}
+    }
+    close IN;
   }
+  close OUT;
 }
 
-sub create_bowtie2_idx {  
-  my @files = @_;
-  
-  my $bwt2_idx_dir = "$curr_dir/bowtie2_indexes";
-  make_path($bwt2_idx_dir);
-  
-  for my $fasta (@files) {
-    my $file = $fasta;
-    print "indexing $fasta for BowTie2\n";
-    
-    my ($name,$path,$suffix) = fileparse($file,@suffixes);
-    $files{bwt2_index} = "$bwt2_idx_dir/$name";
-  
-    if ($fasta =~/\.gz/) {
-      $file = "$bwt2_idx_dir/$name.fa";
-      system("gunzip -c $fasta > $file") == 0 || die "Can't unzip $fasta\n";
-      $files{unzipped_fasta} = "$ENV{PWD}/$file";
+sub getChrName {
+  my @chrs;
+  for my $genome (@_){
+    if ($genome =~ /\.gz$/){
+      open IN, "gunzip -c $genome |";
+    } else {
+      open IN, $genome;
     }
-    system("bowtie2-build $file $files{bwt2_index} >$bwt2_idx_dir/bwt2_idx.log 2>&1") unless $debug;
+    
+    push @chrs, grep{chomp;/^>/} <IN>;
   }
+  @chrs;
+}
+
+sub selectChrs {
+  my @chrs = map {/^>(.+?)\s/} @_;
+  
+  my %selected = map{$_=>1} grep{/(^\d|Mito|MT|chr|X|Y|I|V)|mito/} @chrs;
+  my @not_selected = grep{!exists $selected{$_}} @chrs;
+
+  print("These are the chromosomes that will be used to build the alignment indexes:\n");
+  print_in_n_cols(5,keys %selected);
+  print("\n");
+  
+  if (@not_selected){
+    print("And these will not be included:\n");
+    my $i = scalar @not_selected > 100?100:$#not_selected;
+    print_in_n_cols(5,@not_selected[0..$i]);
+    print "...\n" if scalar @not_selected > 100;
+  }
+  
+  my $bool = $term->ask_yn( prompt   => 'Continue with that selection?',
+			    default  => 'y',
+			  );
+
+  print("All entries in the fasta files will then be used to build the indexes\n") unless $bool;
+  
+  #@selected = grep{my $str=join"|",@selected; /^>($str)/} @chrs;
+  return($bool?keys %selected: @chrs);
+}
+
+sub print_in_n_cols {
+    my ($count, @items) = @_;
+    while (@items){
+        for (1 .. $count){
+            print "\t", shift @items;
+            last unless @items;
+        }
+        print "\n";
+    }
+}
+
+sub create_idx {  
+  my $idx = shift;
+  my $idx_dir = "$curr_dir/${idx}_indexes";
+  make_path($idx_dir);
+  
+  my $fasta = $files{fasta}->{minimal};
+  print "indexing ",basename($fasta), " for $idx\n";
+  
+  my ($name,$path,$suffix) = fileparse($fasta,@suffixes);
+  $files{$idx} = "$idx_dir/$name";
+  
+  system("$index{$idx} $fasta $files{$idx} >$idx_dir/${idx}.log 2>&1") unless $debug;
 }
 
 sub create_tophat_idx{
@@ -247,7 +298,7 @@ sub create_tophat_idx{
     print $fh <DATA>;
     close $fh;
 
-    system("tophat -p12 -G $gtf --transcriptome-index=$tx_idx_d/known_tc  $files{bwt2_index} $fname >$tx_idx_d/tx.log 2>&1")
+    system("tophat -p12 -G $gtf --transcriptome-index=$tx_idx_d/known_tc  $files{bowtie2} $fname >$tx_idx_d/tx.log 2>&1")
       unless $debug;
     remove_tree 'tophat_out';
   }
@@ -255,12 +306,13 @@ sub create_tophat_idx{
 
 sub create_IGV_genome{
   my $file = shift;
-      
+  
+  my $fasta = $files{fasta}->{minimal};    
   $files{igv}->{dir} = "$curr_dir/for_IGV";
   make_path($files{igv}->{dir});
   
-  copy $files{unzipped_fasta},"$files{igv}->{dir}/".basename( $files{unzipped_fasta}) 
-    or die "Could not move $files{unzipped_fasta} to IGV directory\n";
+  copy $fasta,"$files{igv}->{dir}/".basename( $fasta) 
+    or die "Could not move $fasta to IGV directory\n";
   
   copy $file,"$files{igv}->{dir}/".basename($file)
     or die "Could not move $file to IGV directory\n"; 
@@ -272,8 +324,6 @@ sub create_IGV_genome{
 
 sub forgeBSgenome{
   my %fa = @_;
-  
-
 
   my ($name,$path,$suffix) = fileparse($fa{files}[0],@suffixes);
   my ($orgID,$assembly,$release) = ($name =~ /^(.*?)\.(.*)\.(.*)/);
@@ -366,6 +416,15 @@ TOFORGE
 	    ); 
   close OUT; 
   chdir $oldPWD;
+}
+
+sub init{
+  GetOptions('debug'   => \$debug,
+	     'fasta=s' => \$FASTA,
+	     'gtf=s'   => \$GTF
+	    );
+  print "#### RUNNING IN DEBUGING MODE ####\n" if $debug;
+  #die "Need to provide fasta and gtf if eithe one is provided\n" unless ($FASTA || $GTF) && !($FASTA && $GTF);
 }
 
 
