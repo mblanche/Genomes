@@ -49,7 +49,7 @@ our $term = Term::ReadLine->new('brand');
 
 MAIN:{
   init();
-  download_Genome() unless $FASTA;
+  download_Genome();
   create_idx($_) for keys %index;
   create_tophat_idx(@{$files{gtf}->{files}});
   forgeBSgenome(%{$files{fasta}});
