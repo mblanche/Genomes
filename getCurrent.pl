@@ -56,7 +56,7 @@ MAIN:{
   create_IGV_genome($files{GTF});
   exit 1;
 }
-
+  
 sub download_Genome{
   my $server = $term->get_reply(
 				prompt => 'Pick a server',
@@ -296,9 +296,9 @@ sub create_tophat_idx{
     my $fname = $fh->filename;
     print $fh <DATA>;
     close $fh;
-
-    system("tophat -p12 -G $gtf --transcriptome-index=$tx_idx_d/known_tc  $files{bowtie2} $fname >$tx_idx_d/tx.log 2>&1")
-      unless $debug;
+    my $name = basename($files{fasta}->{minimal},'.fa');
+    system("tophat -p12 -G $gtf --transcriptome-index=$tx_idx_d/$name.tc  $files{bowtie2} $fname >$tx_idx_d/tx.log 2>&1")
+      ;#unless $debug;
     remove_tree 'tophat_out';
   }
 }
