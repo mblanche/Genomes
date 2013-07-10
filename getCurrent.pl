@@ -175,6 +175,7 @@ sub download_files {
       push @{$files{$file_type}->{files}},$local_file
     }
   }
+  print "Done downloading the files\n";
 }
 
 sub filterChromosomes {
@@ -182,7 +183,6 @@ sub filterChromosomes {
   
   my @chrs = getChrName(@files);
   my %chrs = map{$_ => 1} selectChrs(@chrs);
-  
   
   $files{fasta}->{minimal} = "$files{fasta}->{dir}/$genomeInfo{base}.min.fa";
   my $out = Bio::SeqIO->new(-file => ">$files{fasta}->{minimal}",
@@ -206,13 +206,13 @@ sub filterChromosomes {
 
 sub getChrName {
   my @chrs;
+  printing "Reading in the different sequence IDs\n";
   for my $genome (@_){
     if ($genome =~ /\.gz$/){
       open IN, "gunzip -c $genome |";
     } else {
       open IN, $genome;
     }
-    
     push @chrs, grep{chomp;/^>/} <IN>;
   }
   @chrs;
