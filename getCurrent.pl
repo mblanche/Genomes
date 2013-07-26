@@ -206,6 +206,7 @@ sub filterChromosomes {
 
 sub getChrName {
   my @chrs;
+
   print "Reading in the different sequence IDs\n";
   for my $genome (@_){
     if ($genome =~ /\.gz$/){
