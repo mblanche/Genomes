@@ -74,7 +74,7 @@ sub download_Genome{
   
   if ($server eq $servers[0]){
 
-    my @genome_name = my @avail_sp = $ftp->ls('/pub/current_gtf');
+    my @genome_name = my @avail_sp = map{basename($_)} $ftp->ls('/pub/current_gtf');
     map{s/(^\w)/\U$1/g;s/_/ /g} @avail_sp;
     my %genomes_id = map{$avail_sp[$_],$_} 0..$#avail_sp;
     
