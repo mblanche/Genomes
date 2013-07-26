@@ -15,6 +15,7 @@ use File::Copy;
 
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError) ;
 use Term::UI;
+use threads;
 
 our $debug;
 
@@ -50,7 +51,10 @@ our $term = Term::ReadLine->new('brand');
 MAIN:{
   init();
   download_Genome();
-  create_idx($_) for keys %index;
+  
+   push @idx_th, threads->create(create_idx,$_) for keys %index;
+  $_->join for @idx_th;
+  
   create_tophat_idx(@{$files{gtf}->{files}});
   forgeBSgenome(%{$files{fasta}});
   create_IGV_genome($files{GTF});
@@ -206,7 +210,7 @@ sub filterChromosomes {
 
 sub getChrName {
   my @chrs;
-  printing "Reading in the different sequence IDs\n";
+  print "Reading in the different sequence IDs\n";
   for my $genome (@_){
     if ($genome =~ /\.gz$/){
       open IN, "gunzip -c $genome |";
