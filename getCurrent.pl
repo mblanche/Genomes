@@ -15,16 +15,13 @@ use File::Copy;
 
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError) ;
 use Term::UI;
-use threads;
 
 our $debug;
 
-our @servers = qw/ftp.ensembl.org
+our @SERVERS = qw/ftp.ensembl.org
 		  ftp.ensemblgenomes.org/;
 
-our @toDownload = qw/fasta gtf/;
-
-our @suffixes = qw/.dna.toplevel.fa.gz
+our @SUFS = qw/.dna.toplevel.fa.gz
 		   .dna.toplevel.fa
 		   .fa
 		   .fa.gz
@@ -32,7 +29,7 @@ our @suffixes = qw/.dna.toplevel.fa.gz
 		   .gtf.gz/;
 
 ### This could be expended to include new aligners
-our %index =  (
+our %INDEX =  (
 	       bowtie  => 'bowtie-build',
 	       bowtie2 => 'bowtie2-build'
 	      );
@@ -45,68 +42,79 @@ our %genomeInfo = map{$_,'--'} qw|fullName
 				  id
 				  releaseDate|;
 
-our (%files,$curr_dir);
-our $term = Term::ReadLine->new('brand');
+our $TERM = Term::ReadLine->new('brand');
 
 MAIN:{
   init();
-  download_Genome();
-  
-   push @idx_th, threads->create(create_idx,$_) for keys %index;
-  $_->join for @idx_th;
-  
-  create_tophat_idx(@{$files{gtf}->{files}});
-  forgeBSgenome(%{$files{fasta}});
-  create_IGV_genome($files{GTF});
-  exit 1;
+  my $files = download_Genome();
+  create_idx($_,$files) for keys %INDEX;
+  create_tophat_idx($files);
+  forgeBSgenome($files);
+  ##create_IGV_genome($files->{GTF}); ## TODO fix this
+  exit 0;
 }
   
 sub download_Genome{
-  my $server = $term->get_reply(
+  my $server = $TERM->get_reply(
 				prompt => 'Pick a server',
-				choices => \@servers,
-				default => $servers[0],
+				choices => \@SERVERS,
+				default =>  $SERVERS[0],
 			       );
   
-  print "Downloading the list of available genomes from $server...\n";
+  print "Downloading the list of available genomes from the current release at $server...\n";
   my $ftp = Net::FTP->new($server,
 			  Passive => 1)
     or die "Can't connect: $@\n";
   $ftp->login
     or die "Couldn't login\n";
   $ftp->binary();
-  
-  if ($server eq $servers[0]){
 
-    my @genome_name = my @avail_sp = map{basename($_)} $ftp->ls('/pub/current_gtf');
+  my @releases = sort{($a=~/-(\d+)/)[0] <=> ($b=~/-(\d+)/)[0]} map{basename $_} grep{/release-/} $ftp->ls('pub');
+  
+  my %releases = map{/(.+)-(.+)/;"$1 $2" => $_} @releases[0..$#releases-1];
+  $releases{current} = $releases[-1];
+  my @rel_names = ((map{/(.+)-(.+)/;"$1 $2"} @releases[0..$#releases-1]),"current");
+  
+  my $release = $TERM->get_reply(
+				 prompt => 'Pick a release',
+				 choices => \@rel_names,
+				 default => 'current',
+				);
+  if ($server eq $SERVERS[0]){
+    my @genome_name = my @avail_sp = map{basename($_)} $ftp->ls("/pub/$releases{$release}/gtf");
     map{s/(^\w)/\U$1/g;s/_/ /g} @avail_sp;
     my %genomes_id = map{$avail_sp[$_],$_} 0..$#avail_sp;
     
-    my $genome = $term->get_reply(
+    my $genome = $TERM->get_reply(
 				  prompt => 'Pick a genome: ',
 				  choices => \@avail_sp,
 				 );
-    
-    $genomeInfo{fullName} = $genome;
+    $genomeInfo{release}   = $releases{$release};
+    $genomeInfo{fullName}  = $genome;
     $genomeInfo{shortName} = $genome_name[$genomes_id{$genome}];
   
-  } elsif ($server eq $servers[1]){
+  } elsif ($server eq $SERVERS[1]){
     my %availGenome;
-    open OUT, $ftp->get("/pub/current/species.txt");
-    while (<OUT>){
-      chomp;
-	my @line = split /\t/;
+    my ($in, $species_file);
+    open($in, '>', \$species_file);
+    
+    $ftp->get("/pub/$releases{$release}/species.txt", $in)
+      or die "get failed ", $ftp->message;
+    
+    for (split "\n", $species_file){
+    chomp;
+      my @line = split /\t/;
       my ($gr) = ($line[2] =~/Ensembl(.+)/);
       next unless $gr;
       push @{$availGenome{$gr}},\@line;
     }
     
-    my $kingdom = $term->get_reply(
+    my $kingdom = $TERM->get_reply(
 				   prompt => 'Pick a kingdom: ',
 				   choices => [keys %availGenome],
 				  );
     
-    my $genome = $term->get_reply(
+    my $genome = $TERM->get_reply(
 				  prompt => 'Pick a genome: ',
 				  choices => [map{$_->[0]} @{$availGenome{$kingdom}}]
 				 );
@@ -115,121 +123,103 @@ sub download_Genome{
     
     my @genome = @{$availGenome{$kingdom}[$idx]};
     
-    %genomeInfo = (fullName    => $genome[0],
-		   shortName   => $genome[1],
-		   group       => $kingdom,
-		   id          => $genome[3],
-		   releaseDate => $genome[5]);
+    $genomeInfo{release}     = $releases{$release};
+    $genomeInfo{fullName}    = $genome[0];
+    $genomeInfo{shortName}   = $genome[1];
+    $genomeInfo{group}       = $kingdom;
+    $genomeInfo{id}          = $genome[3];
+    $genomeInfo{releaseDate} = $genome[5];
   }
   
-  download_files($ftp,$server);
-  filterChromosomes();
+  my $files = download_files($ftp,$server);
+  filterChromosomes($files);
+  return $files;
 }
 
 sub download_files {
   my $ftp = shift;
   my $server = shift;
   
+  my %files;
+  
   print "Connecting to $server for ftp download\n";
-  
-  for my $file_type (@toDownload) {
-    
+  my (@fastas,@gtfs);
+  if ($server eq $SERVERS[0]){
+    @fastas = $ftp->ls("pub/$genomeInfo{release}/fasta/$genomeInfo{shortName}/dna");
+    @gtfs = $ftp->ls("pub/$genomeInfo{release}/gtf/$genomeInfo{shortName}");
+  } 
+  elsif($server eq $SERVERS[1]){
     my $group = lc $genomeInfo{group};
-
-    my $remote_dir;
-    if ($server eq $servers[0]){
-      my ($subtype,$subdir) = $file_type eq 'fasta'?('current_fasta','dna'):('current_gtf','');
-      $remote_dir="/pub/$subtype/$genomeInfo{shortName}/$subdir";
-      
-    }elsif($server eq $servers[1]){
-      my $subtype = $file_type eq 'fasta'?'dna':'';
-      $remote_dir="/pub/current/$group/$file_type/$genomeInfo{shortName}/$subtype";
-    }
-    
-    $ftp->cwd($remote_dir)
-      or die "Couldn't change directory\n";
-    
-    unless (exists $genomeInfo{release}){
-      #($genomeInfo{release}) = ($ftp->pwd() =~ /pub\/(.+?)\//);
-      ($genomeInfo{release}) = ($ftp->pwd() =~ /(release.+?)\//);
-    }
-    
-    my ($repos) = ($server =~ /\.(.+)\.org/);
-    $curr_dir = "current_genome/$repos/$genomeInfo{release}/$genomeInfo{shortName}";
-    my $local_dir="$curr_dir/$file_type";
-    make_path($local_dir);
-    
-    $files{$file_type}->{dir}=$local_dir;
-    
-    my (@files) = $ftp->ls();
-    if ($file_type eq 'fasta'){
-      @files = grep{/\.dna\.toplevel/} @files;
-      ($genomeInfo{base}) = ($files[0] =~ /(.+)\.dna/);
-    }else {
-      @files = grep{/\.gtf/} @files if $file_type eq 'gtf';
-    }
-    die "Coulnd not find a file to download\n" unless @files;
+    @fastas = $ftp->ls("pub/$genomeInfo{release}/$group/fasta/$genomeInfo{shortName}/dna");
+    @gtfs =  $ftp->ls("pub/$genomeInfo{release}/$group/gtf/$genomeInfo{shortName}");
+  }
+  ($files{fasta}->{remote}) = grep{/\.dna\.toplevel/} @fastas;
+  ($files{gtf}->{remote}) = grep{/\.gtf/} @gtfs;
+  die "Could not find the genome files to download\n" unless $files{fasta} && $files{gtf};
+  ($genomeInfo{base}) = (basename($files{fasta}->{remote}) =~ /(.+)\.dna/);
   
-    for ( @files) {
-      my $local_file = $local_dir."/".$_;
-      print "Downloading $_\n";
-      $files{$file_type}->{URL} = "ftp://${server}${remote_dir}/$_";
-      ($ftp->get($_,$local_file)
-       or die "Couldn't dowload $_\n") unless $debug;
-      push @{$files{$file_type}->{files}},$local_file
-    }
+  my ($repos) = ($server =~ /\.(.+)\.org/);
+  $files{curr_dir} = "current_genome/$repos/$genomeInfo{release}/$genomeInfo{shortName}";
+  
+  for my $file_type (qw|gtf fasta|){
+    $files{$file_type}->{URL}   = "ftp://${server}/$files{$file_type}->{remote}";
+    $files{$file_type}->{dir}   = "$files{curr_dir}/$file_type";
+    $files{$file_type}->{local} = $files{$file_type}->{dir} . "/" . basename($files{$file_type}->{remote});
+    make_path($files{$file_type}->{dir});
+    print "Downloading $files{$file_type}->{remote}\n";
+    
+    ## This FTP will restart a previously failed download attemp or 
+    ## skip if the file exists and have same size has remote.
+    my $ftpsize = $ftp->size($files{$file_type}->{remote});
+    my $localsize= stat($files{$file_type}->{local}) ?(stat(_))[7]:(0);
+    next if $ftpsize == $localsize;
+    $ftp->get($files{$file_type}->{remote},$files{$file_type}->{local},$localsize) 
+      or die "Couldn't dowload $_\n",$ftp->message;
   }
   print "Done downloading the files\n";
+  return \%files;
 }
 
 sub filterChromosomes {
-  my @files = @{$files{fasta}->{files}};
+  my $files = shift;
   
-  my @chrs = getChrName(@files);
-  my %chrs = map{$_ => 1} selectChrs(@chrs);
-  
-  $files{fasta}->{minimal} = "$files{fasta}->{dir}/$genomeInfo{base}.min.fa";
-  my $out = Bio::SeqIO->new(-file => ">$files{fasta}->{minimal}",
-			    -format => 'fasta');
-  
-  for my $file (@files){
-    if($file =~ /\.gz$/){
-      open IN, "gunzip -c $file |";
-    }else{
-      open IN, $file;
-    }
-    my $in = Bio::SeqIO->new(-fh => \*IN,
-			     -format => 'fasta');
-    while (my $seq = $in->next_seq){
-      $out->write_seq($seq) if exists $chrs{$seq->display_id}
-    }
-    close IN;
-  }
+  my $g = readFasta($files->{fasta}->{local});
+  my @chrs = selectChrs(keys %{$g});
+  $files->{fasta}->{minimal} = "$files->{fasta}->{dir}/$genomeInfo{base}.min.fa";
+  open OUT,">$files->{fasta}->{minimal}";
+  # Print a minimal fasta with only the selected chromosomes
+  print OUT (join("\n",">$_",@{$g->{$_}}),"\n") for @chrs;
   close OUT;
 }
 
-sub getChrName {
-  my @chrs;
-  
-  print "Reading in the different sequence IDs\n";
-  for my $genome (@_){
-    if ($genome =~ /\.gz$/){
-      open IN, "gunzip -c $genome |";
-    } else {
-      open IN, $genome;
-    }
-    push @chrs, grep{chomp;/^>/} <IN>;
+sub readFasta {
+  my $genome = shift;
+  my $old_IRS = $/;
+  $/='>';
+  print "Deciding what are the chromosomes versus unassembled contigs...\n";
+  if ($genome =~ /\.gz$/){
+    open IN, "gunzip -c $genome |";
+  } else {
+    open IN, $genome;
   }
-  @chrs;
+  my @g = <IN>;
+  #remove the first empty def line
+  shift @g; 
+  # Remove the > at the end of line (currently set as EOL character); 
+  # Remove extra info from def line
+  map{chomp;s/(^.+?)(\s.+)\n/$1\n/} @g; 
+  my %g = map{my @t = split /\s+/;$t[0] => [@t[1..$#t]]} @g;
+  $/=$old_IRS;
+  return \%g;
 }
 
 sub selectChrs {
-  my @chrs = map {/^>(.+?)\s/} @_;
+  my @chrs = map {/(.+?)(\s|$)/;$1} @_;
   
-  my %selected = map{$_=>1} grep{/(^\d|Mito|MT|chr|X|Y|I|V)|mito/} @chrs;
+  my %selected = map{$_=>1} grep{/(^chr|^)(\d+|Mito|mito|MT|Z|W|Y|[IVX]+)([LR]|(|Het|het|$))/} @chrs;
   my @not_selected = grep{!exists $selected{$_}} @chrs;
 
-  print("These are the chromosomes that will be used to build the alignment indexes:\n");
+  print("These are the suggested chromosomes that would be used to build the alignment indexes:\n");
   print_in_n_cols(5,keys %selected);
   print("\n");
   
@@ -237,16 +227,12 @@ sub selectChrs {
     print("And these will not be included:\n");
     my $i = scalar @not_selected > 100?100:$#not_selected;
     print_in_n_cols(5,@not_selected[0..$i]);
-    print "...\n" if scalar @not_selected > 100;
+    print("... (".scalar @not_selected." more)\n") if scalar @not_selected > 100;
   }
-  
-  my $bool = $term->ask_yn( prompt   => 'Continue with that selection?',
+  my $bool = $TERM->ask_yn( prompt   => 'Continue with that selection?',
 			    default  => 'y',
 			  );
-
   print("All entries in the fasta files will then be used to build the indexes\n") unless $bool;
-  
-  #@selected = grep{my $str=join"|",@selected; /^>($str)/} @chrs;
   return($bool?keys %selected: @chrs);
 }
 
@@ -263,73 +249,70 @@ sub print_in_n_cols {
 
 sub create_idx {  
   my $idx = shift;
-  my $idx_dir = "$curr_dir/${idx}_indexes";
+  my $files = shift;
+    
+  my $idx_dir = "$files->{curr_dir}/${idx}_indexes";
   make_path($idx_dir);
   
-  my $fasta = $files{fasta}->{minimal};
+  my $fasta = $files->{fasta}->{minimal};
   print "indexing ",basename($fasta), " for $idx\n";
   
-  my ($name,$path,$suffix) = fileparse($fasta,@suffixes);
-  $files{$idx} = "$idx_dir/$name";
+  my ($name,$path,$suffix) = fileparse($fasta,@SUFS);
+  $files->{$idx} = "$idx_dir/$name";
   
-  system("$index{$idx} $fasta $files{$idx} >$idx_dir/${idx}.log 2>&1") unless $debug;
+  system("$INDEX{$idx} $fasta $files->{$idx} >$idx_dir/${idx}.log 2>&1") unless $debug;
 }
 
 sub create_tophat_idx{
-  my @files = @_;
-
+  my $files = shift;
+  my $gtf = $files->{gtf}->{local};
+  
   print "Creating the transcript index for TopHat splice site alignments\n"; 
-  my $tx_idx_d = "$curr_dir/tophat_tx_idx";
+  my $tx_idx_d = "$files->{curr_dir}/tophat_tx_idx";
   make_path($tx_idx_d);
-    
-  for my $gtf (@files) {
-    next unless $gtf =~ /\.gtf/;
-    my $file = $gtf;
-    
-    my $fh_gtf = "$tx_idx_d/".join("",($genomeInfo{fullName} =~ /^(.).+\s(.+)/)).".gtf";
-
-    if ($gtf =~ /\.gz$/) {
+  
+  my $fh_gtf = "$tx_idx_d/".join("",($genomeInfo{fullName} =~ /^(.).+\s(.+)/)).".gtf";
+  
+  if ($gtf =~ /\.gz$/) {
       gunzip $gtf => $fh_gtf
 	or die "gunzip failed: $GunzipError\n";
-      #$gtf = $fh_gtf->filename;
       $gtf=$fh_gtf;
     }
-    $files{GTF} = $fh_gtf;
+  $files->{GTF} = $fh_gtf;
     
-    ### create a little temp fastq file just to fire up tophat
-    my $fh = File::Temp->new(SUFFIX => ".fastq");
-    my $fname = $fh->filename;
-    print $fh <DATA>;
-    close $fh;
-    my $name = basename($files{fasta}->{minimal},'.fa');
-    system("tophat -p12 -G $gtf --transcriptome-index=$tx_idx_d/$name.tc  $files{bowtie2} $fname >$tx_idx_d/tx.log 2>&1")
-      ;#unless $debug;
-    remove_tree 'tophat_out';
-  }
+  ### create a little temp fastq file just to fire up tophat
+  my $fh = File::Temp->new(SUFFIX => ".fastq");
+  my $fname = $fh->filename;
+  print $fh <DATA>;
+  close $fh;
+  my $name = basename($files->{fasta}->{minimal},'.fa');
+  system("tophat -G $gtf --transcriptome-index=$tx_idx_d/$name.tc  $files->{bowtie2} $fname >$tx_idx_d/tx.log 2>&1");
+  remove_tree 'tophat_out';
 }
 
 sub create_IGV_genome{
-  my $file = shift;
+  my $files = shift;
+  #TO FIX
+  # my $fasta = $files->{fasta}->{minimal};    
+  # $files->{igv}->{dir} = "$curr_dir/for_IGV";
+  # make_path($files->{igv}->{dir});
   
-  my $fasta = $files{fasta}->{minimal};    
-  $files{igv}->{dir} = "$curr_dir/for_IGV";
-  make_path($files{igv}->{dir});
+  # copy $fasta,"$files->{igv}->{dir}/".basename( $fasta) 
+  #   or die "Could not move $fasta to IGV directory\n";
   
-  copy $fasta,"$files{igv}->{dir}/".basename( $fasta) 
-    or die "Could not move $fasta to IGV directory\n";
-  
-  copy $file,"$files{igv}->{dir}/".basename($file)
-    or die "Could not move $file to IGV directory\n"; 
+  # copy $file,"$files->{igv}->{dir}/".basename($file)
+  #   or die "Could not move $file to IGV directory\n"; 
 
-  my $igv_d = $files{igv}->{dir};
+  # my $igv_d = $files->{igv}->{dir};
   
-  system("tar -cvf ${igv_d}.tar.gz $igv_d >$igv_d/compression.log 2>&1");
+  # system("tar -cvf ${igv_d}.tar.gz $igv_d >$igv_d/compression.log 2>&1");
 }
 
 sub forgeBSgenome{
-  my %fa = @_;
-
-  my ($name,$path,$suffix) = fileparse($fa{files}[0],@suffixes);
+  my $files = shift;
+  my %fa = %{$files->{fasta}};
+  
+  my ($name,$path,$suffix) = fileparse($fa{local},@SUFS);
   my ($orgID,$assembly,$release) = ($name =~ /^(.*?)\.(.*)\.(.*)/);
   my ($genus,$species) = split /_/,$orgID;
   my $shortName = substr($genus, 0, 1) . $species;
@@ -341,14 +324,14 @@ sub forgeBSgenome{
   $package =~ s/-/\./g;
   my $title = "$genus $species ($genomeInfo{group}) full genome (Ensembl assembly $assembly version $release)";
   
-  my $bsg_base_dir="$curr_dir/BSgenomeForge";
+  my $bsg_base_dir="$files->{curr_dir}/BSgenomeForge";
   my $bsg_dir = "$bsg_base_dir/srcdata/$package";
   my $seqs_srcdir  = "$bsg_dir/seqs";
   my $masks_srcdir = "$bsg_dir/masks";
   make_path($seqs_srcdir,$masks_srcdir);
   
   my (@chr_name,@contig_name);
-  my $in = Bio::SeqIO->new(-file => "gunzip -c $fa{files}[0] |");
+  my $in = Bio::SeqIO->new(-file => "gunzip -c $fa{local} |");
   my $out_contig = Bio::SeqIO->new(-file   => ">${seqs_srcdir}/contigs.fa",
 				   -format => 'fasta');
   while (my $seq = $in->next_seq){
@@ -393,8 +376,8 @@ mseqnames: $mseqnames
 seqs_srcdir: $ENV{PWD}/$seqs_srcdir
 masks_srcdir: $ENV{PWD}/$masks_srcdir
 SEED
-;
-close OUT;  
+    ;
+  close OUT;  
 
   ### Now to the forge
   open FORGE,"| R --vanilla --slave >$bsg_base_dir/forging.log 2>&1" or die "Can't open R to forge BSgenome";
@@ -404,8 +387,7 @@ library(BSgenome)
 forgeBSgenomeDataPkg(\"$seed_file\")
 q()
 TOFORGE
-;
-  
+    ;
   close FORGE;
   
   my $oldPWD = $ENV{PWD};
